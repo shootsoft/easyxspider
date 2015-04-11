@@ -1,0 +1,104 @@
+2004-09-11  Ravindra Jaju  <jaju [AT] it.iitb.ac.in>
+
+	* include/hypar/StringUtils.hpp, src/utils/StringUtils.cpp:
+	 - These files are now merged with the TextUtils.* files and no more needed.
+
+	* include/hypar/TextUtils.hpp, src/textproc/TextUtils.cpp:
+	 - Merged the StringUtils.{hpp|cpp} files into TextUtils.{hpp|cpp} files
+
+	* src/hypar/DOMNode.cpp:
+	 - Changed the echoSpaces calls to TextUtils::echoSpaces
+
+	* include/hypar/HyXML.hpp:
+	 - Changed character constants in the beginning to the L('.') format
+	 - Added doxygen style comments
+
+	* docs/Doxyfile, docs/doxyfooter:
+	 - Doxygen files for generating docummentation using doxygen.
+
+	* test/hyxmlcleantest.cpp:  - HyXML.doClean is now HyXML.parse
+
+	* test/extractURLs.cpp:
+	 - Fixed bug: *pBuffer was being assigned a char * instead of pBuffer being
+	   assigned
+	 - No more URL parsing here, as it is done in the URLCollector itself.
+	 - Changed doClean to parse
+
+	* src/hypar/HyXML.cpp:
+	 - In initDOM(), attributes of the Tag* element are now copied
+	 - The doClean call is now parse()
+	 - The entity handlers are now inlined
+
+	* src/html/URL.cpp:
+	 - The static call-back function for handling the tags now stores the
+	   base-href value as well.
+	 - URL processing now takes place in the URLCollector, taking into account
+	   the existence of base-href as well.
+	 - the pEncoding argument to the collect() call has an extra qualifier - const
+
+	* include/hypar/URL.hpp:
+	 - Added static member for storing the 'base->href' value
+
+	* include/hypar/HyXML.hpp:  - Changed the call 'doClean' to 'parse'
+	 - Made the 'Entity' handlers inlined
+
+	* test/hyxmlcleantest.cpp:
+	 - Conditional compiling directives for normal and wide-char support.
+
+	* test/extractURLs.cpp:
+	 - Introduced compile-time flags for the normal and wide-char cases ...
+
+2004-09-10  Ravindra Jaju  <jaju [AT] it.iitb.ac.in>
+
+	* src/hypar/HTMLTable.cpp:  - Added more entries - dl, map, area
+
+	* makefile.inc:
+	 - Added -DHYPAR_WIDE_CHAR to CPPFLAGS so that the library is compiled for
+	   wide characters by default.
+
+	* src/hypar/DOMNode.cpp:
+	 - Fixed a missing L(..) around a string literal ...
+
+2004-09-09  Ravindra Jaju  <jaju [AT] it.iitb.ac.in>
+
+	* README:
+	 - First version. Basic information about the library included.
+
+2004-09-08  Ravindra Jaju  <jaju [AT] it.iitb.ac.in>
+
+	* include/hypar/HyXML.hpp, src/hypar/DOMNode.cpp, src/hypar/HTMLTable.cpp, src/hypar/HyXML.cpp:
+	 - The 'iframe' problem
+	   If some tag is empty, hypar prints the tag from DOMNode->toString() as
+	   <tag />. But this leads to problems in display. So, after checking whether
+	   the tag is supposed to be self-closing or not, we now decide whether to
+	   print <tag></tag> or <tag />. Mozilla then displays the output correctly.
+
+	* test/docs/slash.html:  - Later version downloaded today
+
+	* makefile.inc:
+	 - Made compiling for widechar the default by adding -DHYPAR_WIDE_CHAR to
+	   the compilation flags
+
+	* include/hypar/StringUtils.hpp, src/utils/StringUtils.cpp:
+	 - General routines for working with strings
+
+	* Lots of conditional compiling so as to be able to work with char's too,
+	  instead of wchar_t (and string instead of wstring)
+	  It works fine with wide-chars, but not with chars as yet completely.
+
+2004-09-02  Ravindra Jaju  <jaju [AT] it.iitb.ac.in>
+
+	* Makefile, include/Makefile, makefile.inc:  - Rules for 'make include'
+
+	* src/hypar/HyXML.cpp:
+	 - In handleIgnoreChildren, the pEnd pointer was advanced outLen units, as
+	   an effect of the getTill() call. But the other get() or advance() calls on
+	   the wide char stream were not being taken into account. Another variable
+	   introduced (iMoreAdvances) to keep track and then correctly advance pEnd.
+
+2004-09-01  Ravindra Jaju  <jaju [AT] it.iitb.ac.in>
+
+	* src/hypar/HTMLTable.cpp:
+	 - Setting contextSwitch of "li" to 1 makes more sense (for atleast one
+	   particular test case.) I guess it should make proper sense in other cases
+	   too.

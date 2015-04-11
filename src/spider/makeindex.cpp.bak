@@ -1,0 +1,890 @@
+/*
+Author:			尹君 A0717272 A0717202@ss.pku.edu.cn
+Date:			2008-12-29
+FileName:		makeindex.cpp
+Description:	倒排序算法示例.本程序可以对某一个目录下所有文本文件进行分词,检索. 
+					文本在UTF8编码格式下可以完美支持中文分词(二元切分).
+					支持多个关键字精确及模糊搜索(搜索结果文档编号为-1的为分割线)
+Envirment:	Ubtuntu 8.04  G++
+*/
+
+#include <dlfcn.h>
+#include <assert.h>
+#include <dirent.h>
+#include <string>
+#include <vector>
+#include <iostream>
+#include <fstream>
+#include <map>
+#include <set>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <hypar/localdefs.h>
+#include <hypar/MmapWrapper.hpp>
+#include <hypar/ToWideCharConverter.hpp>
+#include <hypar/WideCharEntityStream.hpp>
+#include <hypar/HyXML.hpp>
+#include <hypar/HashUtils.hpp>
+#include <hypar/Debug.hpp>
+#include <hypar/URL.hpp>
+#include <locale.h>
+
+
+#define DEBUG 0
+#define DEBUG_SEGMENT 0
+//PageRank的阻尼系数
+#define PD 0.85
+//迭代次数
+#define PTIME 100
+//只处理1000个页面
+#define N 1000
+using namespace std;
+#if __GNUC__ > 2
+using namespace __gnu_cxx;
+#endif
+
+//链表节点
+struct Node;
+typedef struct Node* PNode;
+
+struct Node
+{
+	int docNum;
+	PNode next;
+};
+typedef struct Node* DocNode;
+
+
+//声明文件索引信息
+map<string,DocNode>  fileIndex;
+//文档列表,根据编号查文档Url
+map<int,string> urlList;
+//根据文档Url查编号
+map<string,int> fileList;
+//本地路径
+string local;
+//用于计算PageRank的矩阵
+map< int , map<int,int> > Ranks;
+//记录每个文档的pageRank值
+map<int,double> pageRanks;
+//记录每个页面的Url数量
+map<int,int> pageLinkCount;
+//创建节点
+DocNode createDocNode(int value)
+{
+	DocNode node = (DocNode)malloc(sizeof(struct Node));
+	//DocNode* node = new DocNode();
+	if(node!=NULL)
+	{
+		node->next = NULL;
+		node->docNum = value;
+	}
+	else cout<<"Out of space!\n"<<endl;
+	return node;
+}
+
+//查找节点是否存在 -1 不存在 1 存在
+int valueExist(DocNode node,int docNum)
+{
+	DocNode x = node;
+	while(x!=NULL && x->docNum != docNum)
+	{
+		x = x->next;
+	}
+	if(x==NULL) return -1;
+	else return 1;
+}
+
+//显示一个链表
+void displayDocList(DocNode list)
+{
+	//如果链表为空
+	if(list==NULL)cout<<"NULL"<<endl;
+	DocNode node = list;
+	while(node->next!=NULL)
+	{
+		cout<<node->docNum<<" ";
+		node=node->next;
+	}
+	cout<<node->docNum<<endl;
+}
+
+
+//根据一个值获取一个节点,同时这个节点会被原节点列表中移除
+int removeNode(DocNode  node, int docNum)
+{
+	//node有可能为空!
+	if(node == NULL) return 0;
+	DocNode pre = node;
+	DocNode x = node;
+	while(x!=NULL && x->docNum != docNum)
+	{
+		x = x->next;
+		//第一次pre不移动
+		//从第二次开始,pre移动
+		if(pre->next!=x)
+		{
+			pre= pre->next;
+		}
+	}
+	//没有找到结果
+	if(x==NULL) return 0;
+	else
+	{	
+		//找到结果有三种情况:
+		//1.如果是头结点并且没有下一个节点了(此链表只有一个节点)
+		if(x==node && x->next == NULL)
+		{
+			delete(node);
+		}
+		//2.这种情况是x是头结点,并且包含下一个
+		else if(x==node && x->next!=NULL)
+		{
+			node = node->next;
+			x->next = NULL;
+#if DEBUG
+			cout<<"xxxxxxxxxxxxxxxxxxxxxxxxxx"<<endl;
+			cout<<"Temp x="<<x->docNum << " Node=";
+			displayDocList(node);
+			cout<<"xxxxxxxxxxxxxxxxxxxxxxxxxx"<<endl;
+#endif
+			delete(x);
+		}
+		else
+		{			
+			//3.找到结果,将节点断开出来
+			pre->next = x->next;
+			x->next = NULL;
+			delete(x);
+		}
+		return 1;
+	}
+}
+
+//因为所有操作均是建立在链表的操作基础之上,所以必须把链表结果拷贝一份,以防止破坏原有的结构
+vector<DocNode> copy(vector<DocNode> nodes)
+{
+	vector<DocNode> result;
+	//cout<<"nodes.size()="<<nodes.size()<<"Ok"<<endl;
+	for(int i =0; i <nodes.size(); i++ )
+	{
+		//拷贝头节点
+		DocNode head = nodes[i];		
+		//cout<<"nodes["<<i<<"]->docNum = "<<head->docNum<<" OK!"<<endl;
+		DocNode node = createDocNode(head->docNum);
+		//cout<<"Copy head "<<i<<" OK!"<<endl;
+		//准备好要移动的指针
+		DocNode temp = node;
+		DocNode probe = nodes[i]->next;
+		//开始遍历
+		while(probe!=NULL)
+		{
+			temp->next =  createDocNode(probe->docNum);
+			temp = temp->next;
+			probe = probe->next;
+		}
+		//推入结果列表
+		result.push_back(node);
+	}
+	//cout<<"result.size()="<<result.size()<<"Ok"<<endl;
+	return result;
+}
+
+//显示一个索引
+void displayMap(map<string,DocNode> nodes)
+{
+	map<string,DocNode>::const_iterator map_it = nodes.begin();
+	while(map_it!=nodes.end())
+	{
+		cout<<map_it->first<<":";
+		displayDocList(map_it->second);
+		cout<<endl;
+		++map_it;
+	}
+}
+
+
+//获取路径下的所有文本文件
+vector<string> GetDirFiles(char *path)
+{
+	//复制字符串s
+	char *szpath = strdupa(path);
+	//打开目录
+	DIR    *pdir = opendir(szpath);
+	//声明文件路径集,用于存储检查到的文件
+	vector<string> vec;
+	dirent *dp;
+	//遍历目录
+	while ((dp = readdir(pdir)) != NULL) {
+		//如果不是文件信息
+		if (strcmp(dp->d_name, ".")== 0 ||
+			strcmp(dp->d_name, "..")== 0)
+			continue;
+		//拼接完整路径
+		string str = szpath ;
+		str += dp->d_name;
+		//判断文件是否是文本
+		if(str.substr(str.size()-4)==".txt")		
+			vec.push_back(dp->d_name);
+#if DEBUG
+		else
+			cout<<"Ignored file: "<<dp->d_name<<endl;
+#endif
+	}
+	//关闭目录操作
+	closedir(pdir);
+	//返回文件列表
+	return vec;
+}
+
+//分词,支持中文(二元切词)和英文(按词切分),数字混合
+//返回的结果字符串中每个单词都是是唯一的
+set<string> segment(string str)
+{
+	//结果列表
+	set<string> list;
+
+	for(int i = 0; i < str.size();i++)
+	{
+		string word = "";
+		int pos = i;
+		//判断是否是可以打印的符号(Ascii)
+		if(isprint(str[i]))
+		{
+			//如果可以打印,判断是否是字母
+			while( isalpha(str[i]) || isdigit(str[i]) )i++;				
+			//截取一个单词或数字的组合
+			//比如 key1 key2 
+			if(pos!=i)
+			{
+				word = str.substr(pos,i- pos);
+#if DEBUG_SEGMENT
+				cout<<word<<"\t start:"<<pos<<"\t end:"<<i<<endl;
+#endif
+				//i--;				
+			}			
+			//既不是字母也不是数字,那么可能是要被忽略的字符了:-)
+			if(pos==i)
+			{
+#if DEBUG_SEGMENT
+				cout<<str[i]<<"\tNot"<<endl;
+#endif
+				continue;			
+			}
+		}		
+		else
+		{
+			if(str[i]<0)
+			{
+				//将中文按字切分
+				word = str.substr(i,3);
+				i+=2;
+				//二元切词
+				if(str[i+1]<0 && !isprint(str[i+1]))
+				{
+					word+=str.substr(i+1,3);
+				}
+
+#if DEBUG_SEGMENT
+				cout<<word<<endl;
+#endif
+			}
+		}
+		if(list.count(word)==0 && word.size()>0 && word[0]!='\0')
+			//加入列表
+			list.insert(word);
+	}
+
+	return list;
+}
+
+
+//按照url和本地路径转换文件，同时创建本地路径
+string convert(string url, string local, int createDir)
+{
+	//首先拼接合法的本地路径
+	string urlpath = url.substr(url.find("//") + 2);
+	if(local[local.size()-1]!='/')
+		local+="/";
+	urlpath = local + urlpath;
+	//加上默认的文件名
+	if(urlpath[urlpath.size()-1]=='/')
+		urlpath+="default.html";
+	if(createDir!=0)
+	{
+		//准备递归创建文件夹
+		string left = "/";
+		string right = urlpath.substr(1,urlpath.find_last_of("/"));
+		//cout<<right<<endl;
+		while(right.find("/")!=-1)
+		{
+			//每次取出一级目录，直接尝试创建目录
+			chdir(left.c_str());
+			string name = right.substr(0,right.find("/"));			
+			mkdir(name.c_str(),0700);
+			//为下一次递归作准备			
+			left+=name + "/";
+			right.erase(0,name.size() + 1);
+		}
+	}
+	return urlpath;
+}
+
+
+//**************************************************************************************************************
+//本地文件的文本内容
+string localTextcontent;
+string baseUrl;
+vector<string> urls;
+
+HyXML::EntityCbRetval processTag(HyXML::Tag *pTag)
+{
+	if(strcmp(pTag->m_pName,"script")==0 || strcmp(pTag->m_pName,"style") == 0)
+		return HyXML::IGNORE_CHILDREN;
+	else
+	{
+		string pn = pTag->m_pName;
+		if(pn =="a")
+		{
+			list<pair<_char *, _char *> >::iterator it = pTag->m_attrList.begin(); 
+			while( it != pTag->m_attrList.end() ) 
+			{ 
+				if(strcmp(it->first,"href")==0)
+				{
+					string href = it->second;
+					if(href.size()<11 || href.substr(0,11)!="javascript:")
+					{
+						URL u(href, baseUrl);
+						if (u.getParseStatus() == URL::URL_OK)
+						{
+							urls.push_back(string(u.getCanonical()));
+							//cout<<href<<endl;
+						}
+					}					
+				}//end if href =0
+				it++;
+			}//end while
+		}//end if pn == a
+		return HyXML::OK;
+	}
+	return HyXML::OK;
+}
+
+bool processText(_char *pText)
+{
+	localTextcontent += pText;
+	localTextcontent +=" ";
+	//cout<<pText<<endl;
+	return true;
+}
+
+bool processComment(_char *pComment)
+{
+	return false;
+}
+
+//获取本地Html的内容
+void getLocalHtml(const char* file)
+{
+	localTextcontent = "";
+	urls.clear();
+	setlocale(LC_ALL, "en_IN.UTF-8");
+	MmapWrapper mmapWrapper(file);
+	//cout<<"getLocalHtml();"<<endl;
+	_char *pBuffer = 0;
+#ifdef HYPAR_WIDE_CHAR
+	ToWideCharConverter toWideCharConverter("UTF-8");
+	pBuffer = reinterpret_cast<_char *> (toWideCharConverter.convert(
+			mmapWrapper.getBuffer(), mmapWrapper.getBufferLength()
+			));
+#else
+	int len = mmapWrapper.getBufferLength() + 1;
+	pBuffer = new char[len];
+	bzero(pBuffer, len);
+	memcpy(pBuffer, mmapWrapper.getBuffer(), len -1);
+#endif
+	//cout<<"Pass2"<<endl;
+	//cout<<"P"<<endl<<pBuffer<<endl;
+	HyXML h;
+	h.tagCb = &processTag;
+	h.textCb = &processText;
+	h.commentCb = &processComment;
+	HyXML::DOMNode node(HyXML::DOMNode::ELEMENT, L("root"));
+	node.m_iLevel = -1;
+	//cout<<"Pass3"<<endl;
+
+	try{
+		h.parse(pBuffer, &node);
+	}
+	catch(...){}
+
+	//cout<<"Pass4"<<endl;
+	delete pBuffer;
+	//cout<<"Pass5"<<endl;
+}
+//**************************************************************************************************************
+
+//添加某一个文档信息添加到索引
+void addDoc(int docNum, string url)
+{
+	string file = convert(url,local,0);
+	baseUrl = url;
+
+	//cout<<url<<" = "<<file<<endl;
+	//读取内容
+	try
+	{
+		getLocalHtml(file.c_str());
+	}catch(...){}
+	//cout<<"Pass1"<<endl;
+	//cout<<localTextcontent<<endl;
+	//将文本分词处理
+	set<string> words = segment(localTextcontent);
+	//遍历每一个单词
+	for(set<string>::iterator it =words.begin(); it != words.end(); it++)
+	{
+		string word = *it;
+		//判断索引中是否包含这个单词
+		map<string,DocNode>::iterator it = fileIndex.find(word);
+		//如果索引中已经存在这个单词,则检查这个单词的文档链表是否包含当前文档编号
+		if(it!=fileIndex.end())
+		{
+			//取出链表
+			DocNode node = fileIndex[word];
+			//如果文档编号不存在,则添加到文档链表的头
+			if(valueExist(node,docNum)==-1)
+			{
+				//创建一个文档节点
+				DocNode docNode = createDocNode(docNum);
+				//添加到头部
+				docNode->next = node;
+				//更新索引信息
+				fileIndex[word] = docNode;
+			}
+		}
+		//如果索引中不包含这个单词
+		else
+		{
+			//创建一个文档节点
+			DocNode docNode = createDocNode(docNum);
+			//更新索引信息
+			fileIndex[word] = docNode;
+		}
+	}
+	
+	//记录从当前页链接出去的Url数量
+	pageLinkCount[docNum] = urls.size();
+	//所有的PageRank初始化为1
+	pageRanks[docNum] = 1;
+	//遍历Url列表，初始化PageRank矩阵
+	vector<string>::iterator it = urls.begin();
+	while(it!=urls.end())
+	{
+		string current = *it;
+		if(current.find(":80") <current.size() )
+		{
+			current=current.erase(current.find(":80"),3); 
+			//如果当前Url库里包含这个链接
+			if( fileList.count(current) !=0)
+			{
+				//读取编号
+				int id = fileList[current];
+				//从docNum指向id的链接为1
+				Ranks[docNum][id] = 1;
+				//cout<<docNum<<"---->"<<id<<endl;
+			}
+			else
+			{
+				//cout<<docNum<<"---->"<<current<<endl;
+			}
+		}
+
+		it++;
+	}
+}
+
+//搜索单词,返回文档列表
+//单字/词的检索
+DocNode searchSingle(string word)
+{
+	//判断索引中是否包含这个单词
+	map<string,DocNode>::iterator it = fileIndex.find(word);
+	//如果索引中已经存在这个单词,则返回文档列表
+	if(it!=fileIndex.end())
+	{
+		//取出链表
+		DocNode node = fileIndex[word];
+		return node;
+	}
+	//如果索引中不包含这个单词
+	else
+	{
+		return NULL;
+	}
+}
+
+//多字检索,自动分词
+DocNode search(string word)
+{
+	//将搜索的关键字分词
+	set<string> keys = segment(word);
+	//cout<<"segment() OK"<<endl;
+	//最终结果列表
+	vector<DocNode> results;
+	//准备临时列表
+	vector<DocNode> temp;
+	//结果有链表有两个指针,一个只头,一个指尾
+	DocNode finalHead = NULL;
+	DocNode finalTail = NULL;
+	//cout<<"Out put key: ";
+	//取出包含所有关键字的集合
+	for(set<string>::iterator it =keys.begin(); it != keys.end(); it++)
+	{
+		string single= *it;
+		//cout<<*it<<"|";
+
+		//判断索引中是否包含这个单词
+		map<string,DocNode>::iterator it = fileIndex.find(single);
+		//如果索引中已经存在这个单词,则返回文档列表
+		if(it!=fileIndex.end())
+		{
+			//取出链表
+			DocNode node = fileIndex[single];
+			temp.push_back(node);
+		}
+	}
+	//cout<<" "<<endl;
+	if(temp.size()==0)
+	{
+		return NULL;
+	}
+	//cout<<"get all docs OK\t"<<temp.size()<<endl;
+	results = copy(temp);
+	//cout<<"copy() OK\t"<<results.size()<<endl;
+
+
+	//如果只有一个结果,那么直接返回
+	if( results.size() == 1)
+	{
+		finalHead = results[0];
+		//cout<<"Only 1 result list"<<endl;
+		return finalHead;
+	}
+
+#if DEBUG
+	//cout<<endl;
+	//cout<<endl;
+	//cout<<endl;
+	for(int i=0; i < results.size() ; i++)
+	{
+		//只要有一个文档不包含,就设置为0
+		displayDocList(results[i]);
+	}
+	//cout<<endl;
+	//cout<<endl;
+	//cout<<endl;
+#endif
+
+	//第一遍过滤, 将包含所有关键字的结果取出
+	DocNode current = results[0];
+	//将结果先都指向同一个节点;
+	//这是一个特殊的节点,文档编号为-1
+	//此结果之前的文档为精确结果,之后的为模糊搜索的结果
+	finalHead = createDocNode(-1);
+	finalTail = finalHead;
+	//cout<<"Init OK"<<endl;
+	while(current!=NULL)
+	{		
+		//提前准备好指针
+		DocNode next = current->next;
+		//int docNum = current->docNum;
+		//flag = 1 表示所有结果都包含当前的docNum
+		//flag = 0 表示部分结果都包含当前的docNum
+		int flag = 1;
+		for(int i=1; i < results.size() ; i++)
+		{
+			//只要有一个文档不包含,就设置为0
+			if(results[i]!=NULL && results[i]->docNum== current->docNum)
+			{
+				//cout<<"OK?"<<endl;
+				results[i]= results[i]->next;
+			}
+			else if(removeNode(results[i],current->docNum)==0) 
+			{	
+				flag = 0;				
+			}
+			/*			cout<<"bbbbbbbbbbbbbbbb"<<endl;	
+			displayDocList(results[i]);
+			cout<<"bbbbbbbbbbbbbbbb"<<endl;*/	
+		}
+		//所有结果都包含这个docNum
+		if(flag==1)
+		{
+			//finalHead始终指向头
+			current->next = finalHead;
+			finalHead = current;				
+		}
+		else if(flag==0)
+		{
+			//finaTail始终指向尾
+			finalTail->next = current;
+			finalTail = current;
+			current->next = NULL;
+		}
+		//指针向后移动
+		current = next;
+#if DEBUG
+		//cout<<"move to next docNum OK"<<endl;
+#endif
+	}
+
+#if DEBUG
+	cout<<"first filter OK"<<endl;
+	displayDocList(finalHead);
+#endif
+
+
+
+	//第二遍,把包含单个关键字的结果接到尾部
+	for(int i=1; i < results.size() ; i++)
+	{
+#if DEBUG
+		cout<<"===================="<<endl;
+		displayDocList(results[i]);
+		cout<<"===================="<<endl;
+#endif
+		//指向results中的某一个结果
+		DocNode docNow = results[i];
+		while(docNow!=NULL)
+		{
+			//首先准备好临时节点
+			DocNode docNext = docNow->next;
+			//将docNow接在finalTail的后面,finalTail始终指向最后
+			finalTail->next = docNow;
+			docNow->next = NULL;
+			finalTail = docNow;
+			//移动指针
+			docNow = docNext;
+		}
+	}
+	//cout<<"second filter OK"<<endl;
+	//finalHead就是最终结果链表的头节点
+	return finalHead;
+}
+
+//将文档列表转换为文件名格式打印到屏幕上
+void displayDocs(DocNode node)
+{
+	DocNode x = node;
+	//查询结果记录器
+	int i=1;
+	while(x!=NULL)
+	{
+		cout<<i<<".\t DocNum:"<< x->docNum<<"\t Name:"<<urlList[x->docNum]<<endl;
+		x = x->next;
+		i++;
+	}
+	cout<<"Finish"<<endl;
+}
+
+//加载Url列表
+void loadUrls(string local)
+{
+	//map<int,string> urlList;
+	//string fileName = local + "record(copy).txt";
+	string fileName = local + "record.txt";
+
+	//Url编号，从1开始
+	int docNum = 1;
+	//打开文件
+	ifstream fin(fileName.c_str());	
+	if(!fin)
+	{
+		//如果打开失败则报错
+		cerr<<fileName<< "\t" << "Error!"<< endl;
+	}
+	else
+	{
+		//读取文档内容到content
+		string line;
+		while(!fin.eof())
+		{
+			getline(fin,line);
+			//printf("%d",line[0]);
+			if(line[0]==49 )
+			{
+				urlList[docNum] = line.substr(2);
+				fileList[line.substr(2)]=docNum;
+				//cout<<line.substr(0,1)<<"="<<line.substr(2)<<endl;
+				docNum++;
+			}
+		}
+		cout<<"共计Url"<<docNum-1<<"个"<<endl;
+		//添加文档内容到索引
+		//addDoc(docNum,content);
+	}
+	fin.close();	
+}
+
+//将Url列表中的内容依次加载进来，并且计算pageRank的引用矩阵
+void loadContentToIndex()
+{
+	for(int i =1; i <=urlList.size() ; i++)
+	{
+		if(i>N)break;
+		cout<<i<<"\t\t"<<urlList[i]<<endl;
+		addDoc(i,urlList[i]);
+	}
+}
+
+//计算PageRank
+void computePageRank()
+{
+	//输出链接关系矩阵
+	string rank= local + "ranks.txt";
+	ofstream ofile(rank.c_str());
+	if(!ofile)
+	{
+		cerr<<rank << "\t" << "Error!"<< endl;
+	}
+	else
+	{
+		for(int i =1; i <=urlList.size() ; i++)
+		{
+			for(int j = 1 ; j <= urlList.size(); j++)
+			{
+				ofile<<Ranks[i][j]<<" ";
+			}
+			ofile<<endl;
+			//cout<<i<<"\t\t"<<urlList[i]<<endl;
+			//addDoc(i,urlList[i]);
+		}	
+	}
+	ofile.close();
+	
+	cout<<"Start Compute PageRank"<<endl;
+
+	//迭代次数
+	for(int t=0; t <PTIME ; t++)
+	{
+		cout<<"Time: " << t +1 <<endl;
+		//依次计算每一个网页的
+		for(int i =1; i <=urlList.size() ; i++)
+		{
+			//根据http://hedong.3322.org/archives/000199.html中分析的PageRank的改进算法
+			//PR(A) = (1-d) / N + d (PR(T1)/C(T1) + ... + PR(Tn)/C(Tn)) 
+			//其中N是互联网上所有网页的数量
+			//其中：PR(A):页面A的网页级别, 
+			//PR(Ti)：页面Ti的网页级别，页面Ti链向页面A， 
+			//C(Ti)：页面Ti链出的链接数量，
+			//d：阻尼系数，取值在0－1之间. 
+			pageRanks[i] = (double)(1- PD) / (double)urlList.size() ;		
+			double pr =0;
+			for(int j = 1 ; j <= urlList.size(); j++)
+			{
+				if(Ranks[j][i]!=0)
+				{					
+					pr +=pageRanks[j] / (double)pageLinkCount[j];
+				}
+			}
+			pageRanks[i]+= PD * pr;
+			
+		}	
+	}	
+
+	//输出每个页面的PageRank
+	string pagerank= local + "pageranks.txt";
+	ofstream ofilerank(pagerank.c_str());
+	if(!ofilerank)
+	{
+		cerr<<pagerank << "\t" << "Error!"<< endl;
+	}
+	else
+	{		
+		for(int i =1; i <=urlList.size() ; i++)
+		{
+				ofilerank<<pageRanks[i]<<endl;			
+				cout<< i << "=" << pageRanks[i]<< "\t" << urlList[i] <<endl;
+		}
+	}
+	ofilerank.close();	
+}
+
+//将索引保存到文件
+void saveIndex()
+{
+	//输出索引
+	string index= local + "index.data";
+	ofstream ofile(index.c_str());
+	if(!ofile)
+	{
+		cerr<<index << "\t" << "Error!"<< endl;
+	}
+	else
+	{
+		//输出索引
+		map<string,DocNode>::const_iterator map_it = fileIndex.begin();
+		while(map_it!=fileIndex.end())
+		{
+			//首先输出关键词
+			ofile<<map_it->first<<"\t";
+			//将链表输出
+			DocNode x = map_it->second;
+			while(x!=NULL)
+			{
+				ofile<<x->docNum<<"\t";
+				x = x->next;
+			}
+			//链表输出结束，换行
+			ofile<<endl;
+			++map_it;
+		}
+	}
+	ofile.close();
+
+}
+
+
+//本地程序入口
+int main(int argc , char** argv)
+{
+	//参数检查,第二个路径参数必须存在
+	//第二个参数是本地路径
+	assert(argc==2);
+	
+	local = argv[1];
+	//加载Url列表
+	loadUrls(local);
+	//生成索引
+	loadContentToIndex();
+	//计算PageRank
+	 computePageRank();
+	//将索引输出
+	 saveIndex();
+	////显示索引
+	////displayMap(fileIndex);
+	////测试
+	//string keys;
+	////用 空格+f 结束 输入
+	//cout<<"请输入搜索关键字( 输入 \"\\exit\" 退出 ):"<<endl;
+	//getline(cin,keys); 
+	//while(keys!="\\exit")
+	//{
+	//	cout<<"您输入的关键字为: "<<keys<<endl;
+	//	DocNode nodes = search(keys);
+	//	if(nodes==NULL)
+	//		cout<<"抱歉,没有搜索到结果!"<<endl;
+	//	else
+	//	{
+	//		cout<<"搜索结果:"<<endl;
+	//		displayDocs(nodes);
+	//	}
+	//	cout<<"请输入搜索关键字( 输入 \"\\exit\" 退出 ):"<<endl;
+	//	getline(cin,keys); 
+	//}	
+	return 0;
+}
+
+

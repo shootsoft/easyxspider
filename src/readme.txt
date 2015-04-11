@@ -1,0 +1,6 @@
+bin目录下是可执行文件
+data目录下是搜使用的数据
+include目录下是hypar的include
+spider目录下是EasyXSpider
+src目录下是原hypar，但是经过了一点点的修正
+test目录下hypar的一些测试

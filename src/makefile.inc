@@ -1,0 +1,24 @@
+CC = gcc
+CXX = g++
+DEFAULT_CPPFLAGS = -Wall -ggdb# -DHYPAR_WIDE_CHAR
+#DEFAULT_CPPFLAGS = -Wall -O3 -DHYPAR_WIDE_CHAR
+CPPFLAGS = ${DEFAULT_CPPFLAGS}
+CPPFLAGS_STATIC = ${DEFAULT_CPPFLAGS}
+#CPPFLAGS_STATIC += -static
+CPPFLAGS += -fPIC
+LINKER_FLAGS = -shared -ldl
+INCLUDES = -I${TOP_SRCDIR}/include
+
+INSTALL_LIBDIR=${HOME}/lib
+INSTALL_BINDIR=${HOME}/bin
+INSTALL_INCDIR=${HOME}/include
+
+SRC_SUBDIRS = textproc hypar
+
+#LIBDIRS = $(foreach x, $(SRC_SUBDIRS), -L${TOP_SRCDIR}/src/$(x)/)
+LIBDIRS = -L${TOP_SRCDIR}/src
+LIBS = -lhypar2
+LIBS_STATIC = $(shell ls ${TOP_SRCDIR}/src/.obj/*.o)
+
+.cpp.o:
+	${CXX} ${INCLUDES} ${CPPFLAGS} -c -o $@ $<
